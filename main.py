@@ -137,20 +137,40 @@ async def create_browser_context(
     env_storage_state = os.environ.get("TIKTOK_STORAGE_STATE", "").strip()
     if env_storage_state:
         state_path = Path(config.STORAGE_STATE_FILE).resolve()
-        state_path.write_text(env_storage_state, encoding="utf-8")
-        logger.info("Loaded session from TIKTOK_STORAGE_STATE env var into %s (headless=%s)", state_path, headless)
-        browser = await playwright_instance.chromium.launch(
-            headless=headless,
-            args=config.BROWSER_ARGS,
+        try:
+            # Validate JSON (or decode base64 if encoded)
+            if not env_storage_state.startswith("{"):
+                import base64
+                env_storage_state = base64.b64decode(env_storage_state).decode("utf-8")
+            parsed_state = json.loads(env_storage_state)
+            state_path.write_text(json.dumps(parsed_state, ensure_ascii=False), encoding="utf-8")
+            logger.info("Loaded session from TIKTOK_STORAGE_STATE env var into %s (headless=%s)", state_path, headless)
+            browser = await playwright_instance.chromium.launch(
+                headless=headless,
+                args=config.BROWSER_ARGS,
+            )
+            context = await browser.new_context(
+                storage_state=str(state_path),
+                user_agent=config.USER_AGENT,
+                viewport=config.VIEWPORT,
+                locale="en-US",
+            )
+            await context.add_init_script(STEALTH_INIT_SCRIPT)
+            return browser, context
+        except Exception as exc:
+            logger.error(
+                "TIKTOK_STORAGE_STATE secret is not valid JSON (%s). "
+                "Please re-paste the compact storage_state.json into GitHub Secrets!",
+                exc,
+            )
+            sys.exit(1)
+
+    if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+        logger.error(
+            "Running inside GitHub Actions, but TIKTOK_STORAGE_STATE secret is empty! "
+            "Please add the TIKTOK_STORAGE_STATE secret in your GitHub repo Settings -> Secrets -> Actions."
         )
-        context = await browser.new_context(
-            storage_state=str(state_path),
-            user_agent=config.USER_AGENT,
-            viewport=config.VIEWPORT,
-            locale="en-US",
-        )
-        await context.add_init_script(STEALTH_INIT_SCRIPT)
-        return browser, context
+        sys.exit(1)
 
     profile_dir = Path(config.USER_DATA_DIR).resolve()
     profile_dir.mkdir(parents=True, exist_ok=True)
@@ -170,11 +190,31 @@ async def create_browser_context(
 
 
 async def export_storage_state(context: BrowserContext) -> None:
-    """Export cookies and localStorage to storage_state.json for cloud/GitHub Actions use."""
+    """
+    Export cookies and essential localStorage to storage_state.json for cloud/GitHub Actions use.
+    Strips bulky TikTok translation/telemetry caches (`text.*`, `f_s_1`, `ppf_eligibility_v2`)
+    so the file stays under ~8 KB (well below GitHub's 48 KB secret limit and Linux's 128 KB env limit).
+    """
     try:
         state_path = Path(config.STORAGE_STATE_FILE).resolve()
-        await context.storage_state(path=str(state_path))
-        logger.info("Exported cloud-ready session state to %s", state_path)
+        raw_state = await context.storage_state()
+        for origin_entry in raw_state.get("origins", []):
+            ls = origin_entry.get("localStorage", [])
+            origin_entry["localStorage"] = [
+                item
+                for item in ls
+                if not item.get("name", "").startswith(("text.", "version.", "f_s_", "ppf_eligibility"))
+                and len(item.get("value", "")) < 4000
+            ]
+        state_path.write_text(
+            json.dumps(raw_state, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        logger.info(
+            "Exported compact cloud-ready session state to %s (%d bytes)",
+            state_path,
+            state_path.stat().st_size,
+        )
     except PlaywrightError as exc:
         logger.debug("Could not export storage_state.json: %s", exc)
 
