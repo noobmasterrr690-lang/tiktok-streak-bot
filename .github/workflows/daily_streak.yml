@@ -1,0 +1,49 @@
+name: Daily TikTok Streak Automation
+
+on:
+  schedule:
+    # Runs right after midnight reset (00:02 AM PHT = 16:02 UTC), plus 09:00 AM and 08:00 PM PHT
+    - cron: '2 16 * * *'
+    - cron: '0 1,12 * * *'
+  workflow_dispatch: # Allows manual 1-click trigger from the GitHub Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  send-streaks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies & Playwright Chromium
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Run TikTok Streak Bot (Headless Cloud Mode)
+        env:
+          TZ: Asia/Manila
+          TIKTOK_STORAGE_STATE: ${{ secrets.TIKTOK_STORAGE_STATE }}
+        run: |
+          python main.py --headless
+
+      - name: Commit updated streak_log.json (Prevent Double-Sending)
+        run: |
+          if [ -f streak_log.json ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add streak_log.json
+            git diff --staged --quiet || git commit -m "chore: update daily streak_log.json [skip ci]"
+            git push
+          fi
+

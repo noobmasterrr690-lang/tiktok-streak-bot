@@ -1,0 +1,12 @@
+# Virtual environment & Python cache
+.venv/
+__pycache__/
+*.pyc
+
+# Sensitive TikTok session data (NEVER commit to Git)
+tiktok_profile/
+storage_state.json
+
+# Runtime logs
+streak_automation.log
+
